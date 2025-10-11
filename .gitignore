@@ -1,0 +1,70 @@
+# Flutter/Dart/Pub related
+.dart_tool/
+.packages
+build/
+pubspec.lock
+.claude/
+# IDEs
+.idea/
+.vscode/
+*.iml
+
+# Android
+android/.gradle/
+android/app/build/
+android/local.properties
+android/key.properties
+*.keystore
+*.jks
+
+# iOS
+ios/Flutter/.last_build_id
+ios/Pods/
+ios/Runner.xcworkspace/
+ios/Flutter/Flutter.framework
+ios/Flutter/Flutter.podspec
+ios/.symlinks/
+ios/build/
+ios/DerivedData/
+*.xcuserstate
+
+# macOS
+macos/Flutter/ephemeral/
+macos/build/
+macos/Pods/
+macos/Runner.xcworkspace/
+
+# Windows
+windows/flutter/ephemeral/
+windows/build/
+
+# Linux
+linux/flutter/ephemeral/
+linux/build/
+
+# Web
+web/.dart_tool/
+web/.firebase/
+web/.cache/
+
+# Generated plugin registrant
+flutter_export_environment.sh
+
+# Symbolic links
+.symlinks/
+
+# Misc
+*.log
+*.tmp
+*.lock
+*.DS_Store
+!.vscode/settings.json
+!.vscode/launch.json
+!.vscode/tasks.json
+
+# Coverage
+coverage/
+
+# Firebase / secrets
+google-services.json
+GoogleService-Info.plist
