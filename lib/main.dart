@@ -1160,6 +1160,7 @@ class _AllEventsScreenState extends State<AllEventsScreen> {
                   style: TextStyle(color: Color(0xFF9EF0D0)), // Mint green text for visibility
                   decoration: InputDecoration(
                     hintText: 'Search events...',
+                    hintStyle: TextStyle(color: Colors.grey[600]), // Darker hint text
                     prefixIcon: const Icon(Icons.search),
                     suffixIcon: _searchQuery.isNotEmpty
                       ? IconButton(
@@ -1678,11 +1679,15 @@ class EventCard extends StatelessWidget {
                           color: Colors.teal[600],
                         ),
                         const SizedBox(width: 4),
-                        Text(
-                          event.type,
-                          style: const TextStyle(
-                            fontSize: 12,
-                            color: Color(0xFF9EF0D0),
+                        Flexible(
+                          child: Text(
+                            event.type,
+                            style: const TextStyle(
+                              fontSize: 12,
+                              color: Color(0xFF9EF0D0),
+                            ),
+                            overflow: TextOverflow.ellipsis,
+                            maxLines: 1,
                           ),
                         ),
                       ],
