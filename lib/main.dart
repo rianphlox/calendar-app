@@ -1157,7 +1157,7 @@ class _AllEventsScreenState extends State<AllEventsScreen> {
                 padding: const EdgeInsets.all(16),
                 child: TextField(
                   controller: _searchController,
-                  style: TextStyle(color: Color(0xFF9EF0D0)), // Mint green text for visibility
+                  style: TextStyle(color: Colors.black), // Black text for better visibility
                   decoration: InputDecoration(
                     hintText: 'Search events...',
                     hintStyle: TextStyle(color: Colors.grey[600]), // Darker hint text
