@@ -11,11 +11,12 @@ dependencies:
   flutter:
     sdk: flutter
   provider: ^6.1.1
-  intl: ^0.18.1
+  intl: ^0.19.0
   hive: ^2.2.3
   hive_flutter: ^1.1.0
   path_provider: ^2.1.1
   flutter_local_notifications: ^17.2.3
+  android_alarm_manager_plus: ^4.0.4
   timezone: ^0.9.4
 
 dev_dependencies:

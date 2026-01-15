@@ -4,6 +4,7 @@ import 'package:provider/provider.dart';
 import 'package:intl/intl.dart';
 import 'package:hive_flutter/hive_flutter.dart';
 import 'package:flutter_local_notifications/flutter_local_notifications.dart';
+import 'package:android_alarm_manager_plus/android_alarm_manager_plus.dart';
 import 'package:timezone/timezone.dart' as tz;
 import 'package:timezone/data/latest.dart' as tz;
 
@@ -75,6 +76,7 @@ class ThemeProvider with ChangeNotifier {
 void main() async {
   WidgetsFlutterBinding.ensureInitialized();
   tz.initializeTimeZones();
+  await NotificationService.initialize();
   await Hive.initFlutter();
   Hive.registerAdapter(EventAdapter());
   await Hive.openBox<Event>('events');
@@ -170,25 +172,74 @@ class Event extends HiveObject {
   Color get color => Color(colorValue);
 }
 
-// Notification Service
+// Alarm manager callback for persistent notifications
+@pragma('vm:entry-point')
+void alarmCallback() async {
+  // Initialize notifications for background use
+  final FlutterLocalNotificationsPlugin notifications = FlutterLocalNotificationsPlugin();
+
+  const androidSettings = AndroidInitializationSettings('@mipmap/ic_launcher');
+  const iosSettings = DarwinInitializationSettings();
+  const initSettings = InitializationSettings(android: androidSettings, iOS: iosSettings);
+
+  await notifications.initialize(initSettings);
+
+  // Show immediate notification
+  await notifications.show(
+    DateTime.now().millisecondsSinceEpoch ~/ 1000,
+    'Event Reminder',
+    'You have an upcoming ministry event!',
+    const NotificationDetails(
+      android: AndroidNotificationDetails(
+        'event_reminders',
+        'Event Reminders',
+        channelDescription: 'Ministry event notifications',
+        importance: Importance.high,
+        priority: Priority.high,
+      ),
+    ),
+  );
+}
+
+// Enhanced Notification Service with persistent notifications
 class NotificationService {
   static final FlutterLocalNotificationsPlugin _notifications =
       FlutterLocalNotificationsPlugin();
 
   static Future<void> initialize() async {
-    const androidSettings = AndroidInitializationSettings('@mipmap/ic_launcher');
-    const iosSettings = DarwinInitializationSettings(
-      requestAlertPermission: true,
-      requestBadgePermission: true,
-      requestSoundPermission: true,
-    );
+    try {
+      print('Initializing notification service...');
 
-    const initializationSettings = InitializationSettings(
-      android: androidSettings,
-      iOS: iosSettings,
-    );
+      // Initialize Flutter Local Notifications
+      const androidSettings = AndroidInitializationSettings('@mipmap/ic_launcher');
+      const iosSettings = DarwinInitializationSettings(
+        requestAlertPermission: true,
+        requestBadgePermission: true,
+        requestSoundPermission: true,
+      );
 
-    await _notifications.initialize(initializationSettings);
+      const initializationSettings = InitializationSettings(
+        android: androidSettings,
+        iOS: iosSettings,
+      );
+
+      bool? initialized = await _notifications.initialize(initializationSettings);
+      print('Flutter Local Notifications initialized: $initialized');
+
+      // Initialize Android Alarm Manager for persistence
+      try {
+        await AndroidAlarmManager.initialize();
+        print('Android Alarm Manager initialized successfully');
+      } catch (e) {
+        print('Android Alarm Manager failed to initialize: $e');
+        // Continue without alarm manager - notifications will still work partially
+      }
+
+      print('Notification service initialization complete');
+    } catch (e) {
+      print('Error initializing notification service: $e');
+      rethrow;
+    }
   }
 
   static Future<void> scheduleEventReminder({
@@ -198,60 +249,84 @@ class NotificationService {
     required DateTime eventTime,
     required int reminderMinutesBefore,
   }) async {
-    final reminderTime = eventTime.subtract(Duration(minutes: reminderMinutesBefore));
+    try {
+      final reminderTime = eventTime.subtract(Duration(minutes: reminderMinutesBefore));
 
-    if (reminderTime.isBefore(DateTime.now())) {
-      return; // Don't schedule past reminders
-    }
+      if (reminderTime.isBefore(DateTime.now())) {
+        print('Skipping past reminder for $title (${reminderTime} is before now)');
+        return; // Don't schedule past reminders
+      }
 
-    const androidDetails = AndroidNotificationDetails(
-      'event_reminders',
-      'Event Reminders',
-      channelDescription: 'Notifications for upcoming events',
-      importance: Importance.high,
-      priority: Priority.high,
-    );
-
-    const iosDetails = DarwinNotificationDetails();
-
-    const notificationDetails = NotificationDetails(
-      android: androidDetails,
-      iOS: iosDetails,
-    );
-
-    final notificationId = '${eventId}_$reminderMinutesBefore'.hashCode;
+      final notificationId = '${eventId}_$reminderMinutesBefore'.hashCode.abs();
+      print('Scheduling reminder for $title at $reminderTime (ID: $notificationId)');
 
     // Create appropriate message based on time before event
     String reminderMessage;
     if (reminderMinutesBefore == 0) {
-      reminderMessage = '$description\nEvent is starting now!';
+      reminderMessage = 'Event is starting now!\n$description';
     } else if (reminderMinutesBefore >= 1440) {
       final days = (reminderMinutesBefore / 1440).round();
-      reminderMessage = '$description\nStarts in $days day${days > 1 ? 's' : ''}';
+      reminderMessage = 'Starts in $days day${days > 1 ? 's' : ''}\n$description';
     } else if (reminderMinutesBefore >= 60) {
       final hours = (reminderMinutesBefore / 60).round();
-      reminderMessage = '$description\nStarts in $hours hour${hours > 1 ? 's' : ''}';
+      reminderMessage = 'Starts in $hours hour${hours > 1 ? 's' : ''}\n$description';
     } else {
-      reminderMessage = '$description\nStarts in $reminderMinutesBefore minute${reminderMinutesBefore > 1 ? 's' : ''}';
+      reminderMessage = 'Starts in $reminderMinutesBefore minute${reminderMinutesBefore > 1 ? 's' : ''}\n$description';
     }
 
-    await _notifications.zonedSchedule(
-      notificationId,
-      'Event Reminder: $title',
-      reminderMessage,
-      tz.TZDateTime.from(reminderTime, tz.local),
-      notificationDetails,
-      androidScheduleMode: AndroidScheduleMode.exactAllowWhileIdle,
-      uiLocalNotificationDateInterpretation:
-          UILocalNotificationDateInterpretation.absoluteTime,
-    );
+      // Schedule with Flutter Local Notifications (immediate)
+      await _notifications.zonedSchedule(
+        notificationId,
+        'Event Reminder: $title',
+        reminderMessage,
+        tz.TZDateTime.from(reminderTime, tz.local),
+        const NotificationDetails(
+          android: AndroidNotificationDetails(
+            'event_reminders',
+            'Event Reminders',
+            channelDescription: 'Ministry event notifications',
+            importance: Importance.high,
+            priority: Priority.high,
+          ),
+        ),
+        androidScheduleMode: AndroidScheduleMode.exactAllowWhileIdle,
+        uiLocalNotificationDateInterpretation:
+            UILocalNotificationDateInterpretation.absoluteTime,
+      );
+      print('Flutter notification scheduled successfully');
+
+      // Schedule with Android Alarm Manager for persistence across reboots
+      try {
+        await AndroidAlarmManager.oneShot(
+          reminderTime.difference(DateTime.now()),
+          notificationId,
+          alarmCallback,
+          exact: true,
+          wakeup: true,
+          rescheduleOnReboot: true,
+        );
+        print('Android Alarm Manager scheduled successfully');
+      } catch (e) {
+        print('Android Alarm Manager scheduling failed: $e');
+        // Continue - Flutter notifications will still work
+      }
+    } catch (e) {
+      print('Error scheduling reminder for $title: $e');
+      rethrow;
+    }
   }
 
   static Future<void> cancelEventReminders(String eventId) async {
-    // Cancel all reminders for this event
-    for (int minutes in [0, 60, 240, 1440]) { // At start, 1hr, 4hr, 1day before
-      final notificationId = '${eventId}_$minutes'.hashCode;
+    // Cancel Flutter Local Notifications
+    for (int minutes in [0, 60, 240, 1440]) {
+      final notificationId = '${eventId}_$minutes'.hashCode.abs();
       await _notifications.cancel(notificationId);
+    }
+
+    // Cancel Android Alarm Manager tasks
+    for (int minutes in [0, 60, 240, 1440]) {
+      final notificationId = '${eventId}_$minutes'.hashCode.abs();
+      await AndroidAlarmManager.cancel(notificationId);
     }
   }
 
@@ -288,6 +363,36 @@ class NotificationService {
     if (minutes < 60) return '$minutes minutes before';
     if (minutes < 1440) return '${(minutes / 60).round()} hours before';
     return '${(minutes / 1440).round()} days before';
+  }
+
+  // Test method to verify notifications work
+  static Future<void> scheduleTestNotification() async {
+    try {
+      final testTime = DateTime.now().add(const Duration(seconds: 10));
+      print('Scheduling test notification for $testTime');
+
+      await _notifications.zonedSchedule(
+        999999, // Test notification ID
+        'QDay Calendar Test',
+        'Notification system is working! ✅',
+        tz.TZDateTime.from(testTime, tz.local),
+        const NotificationDetails(
+          android: AndroidNotificationDetails(
+            'event_reminders',
+            'Event Reminders',
+            channelDescription: 'Ministry event notifications',
+            importance: Importance.high,
+            priority: Priority.high,
+          ),
+        ),
+        androidScheduleMode: AndroidScheduleMode.exactAllowWhileIdle,
+        uiLocalNotificationDateInterpretation:
+            UILocalNotificationDateInterpretation.absoluteTime,
+      );
+      print('Test notification scheduled successfully');
+    } catch (e) {
+      print('Failed to schedule test notification: $e');
+    }
   }
 }
 
@@ -335,6 +440,39 @@ class RecurrenceService {
           }
         }
         break;
+      case 'first_sunday_monthly':
+        while (nextDate.isBefore(endDate)) {
+          // Move to next month
+          int nextMonth = nextDate.month + 1;
+          int nextYear = nextDate.year;
+          if (nextMonth > 12) {
+            nextMonth = 1;
+            nextYear++;
+          }
+
+          // Find first Sunday of the next month
+          DateTime firstOfMonth = DateTime(nextYear, nextMonth, 1, nextDate.hour, nextDate.minute);
+
+          // Calculate days to add to get to first Sunday
+          // DateTime.weekday: 1=Monday, 2=Tuesday, ..., 7=Sunday
+          int daysToAdd;
+          if (firstOfMonth.weekday == DateTime.sunday) {
+            daysToAdd = 0; // First day is already Sunday
+          } else {
+            // Days from current weekday to next Sunday
+            daysToAdd = DateTime.sunday - firstOfMonth.weekday;
+            if (daysToAdd < 0) daysToAdd += 7; // Handle when Sunday is next week
+          }
+
+          nextDate = firstOfMonth.add(Duration(days: daysToAdd));
+
+          if (nextDate.isBefore(endDate)) {
+            events.add(_createRecurringEvent(baseEvent, nextDate));
+          } else {
+            break;
+          }
+        }
+        break;
     }
 
     return events;
@@ -379,177 +517,87 @@ class EventProvider with ChangeNotifier {
     // Load specific events if box is empty (first time app run)
     if (_eventBox.isEmpty) {
       _addInitialMockEvents();
+    } else {
+      // Check if we need to regenerate recurring events
+      _checkAndAddRecurringEvents();
     }
+  }
+
+  void _checkAndAddRecurringEvents() {
+    // Remove any existing communion events to avoid duplicates
+    final existingEvents = _eventBox.values.where((event) =>
+        event.title.contains('Communion Service')).toList();
+
+    for (final event in existingEvents) {
+      event.delete(); // Remove from Hive
+    }
+
+    // Always add the recurring Global Communion Service
+    final communionEvent = Event(
+      id: 'recurring_communion_${DateTime.now().millisecondsSinceEpoch}',
+      title: 'Global Communion Service with Pastor Chris',
+      description: 'Monthly communion service held every first Sunday of the month',
+      dateTime: DateTime(2026, 1, 4, 10, 0), // 10 AM on Jan 4, 2026 (first Sunday)
+      type: 'Ministry Program',
+      participants: [],
+      color: Colors.teal,
+      recurrenceRule: 'first_sunday_monthly',
+    );
+
+    // Generate and add all recurring instances (12 months ahead)
+    final recurringEvents = RecurrenceService.generateRecurringEvents(communionEvent, monthsAhead: 12);
+
+    for (final recurringEvent in recurringEvents) {
+      _eventBox.add(recurringEvent);
+      NotificationService.scheduleAllEventReminders(recurringEvent);
+    }
+    notifyListeners();
   }
 
   void _addInitialMockEvents() {
     final initialEvents = [
       Event(
         id: 'event_1',
-        title: 'Rhapsody Wonder Conferences, Road to Reachout World Edition',
-        description: 'October - November 2025',
-        dateTime: DateTime(2025, 10, 1),
-        type: 'Conference',
+        title: 'Global Service with Pastor Chris',
+        description: 'Sunday 18th January 2026, 8am GMT+1',
+        dateTime: DateTime(2026, 1, 18, 8, 0),
+        type: 'Ministry Program',
         participants: [],
         color: Colors.blue,
       ),
       Event(
         id: 'event_2',
-        title: 'Road to Healing Streams Live Healing Services',
-        description: '10 October 2025 - 23 October 2025',
-        dateTime: DateTime(2025, 10, 10),
-        type: 'HSLHS Preparatory Program',
-        participants: [],
-        color: Colors.green,
-      ),
-      Event(
-        id: 'event_3',
-        title: 'Global Principals and Teachers Summit (4th Quarter, 19th Edition)',
-        description: 'Foundation School Training',
-        dateTime: DateTime(2025, 10, 13),
-        type: 'Training Program',
-        participants: [],
-        color: Colors.orange,
-      ),
-      Event(
-        id: 'event_4',
-        title: 'Healing Streams Live Healing Services',
-        description: '24 October - 26 October 2025',
-        dateTime: DateTime(2025, 10, 24),
-        type: 'Ministry Program',
+        title: 'Global Fasting and Prayer with Pastor Chris',
+        description: 'Tuesday 20th - Thursday 22nd January 6pm GMT+1 daily, 2026',
+        dateTime: DateTime(2026, 1, 20, 18, 0),
+        type: 'Fasting and Prayer',
         participants: [],
         color: Colors.purple,
       ),
       Event(
-        id: 'event_5',
-        title: 'November Global Communion Service',
-        description: '2 November 2025',
-        dateTime: DateTime(2025, 11, 2),
-        type: 'Ministry Program',
-        participants: [],
-        color: Colors.red,
-      ),
-      Event(
-        id: 'event_6',
-        title: 'International Pastors\' Conference',
-        description: '10 November - 12 November 2025',
-        dateTime: DateTime(2025, 11, 10),
-        type: 'Ministry Program',
-        participants: [],
-        color: Colors.teal,
-      ),
-      Event(
-        id: 'event_7',
-        title: 'International Pastors\' & Partners\' Conference',
-        description: '13 November - 16 November 2025',
-        dateTime: DateTime(2025, 11, 13),
-        type: 'Ministry Program',
-        participants: [],
-        color: Colors.indigo,
-      ),
-      Event(
-        id: 'event_8',
-        title: 'Christian Leaders Conference India with Pastor Chris',
-        description: '25 November - 27 November 2025',
-        dateTime: DateTime(2025, 11, 25),
-        type: 'Ministry Program',
-        participants: [],
-        color: Colors.brown,
-      ),
-      Event(
-        id: 'event_9',
-        title: 'Higher Life Conference India, with Pastor Chris',
-        description: '28 November 2025',
-        dateTime: DateTime(2025, 11, 28),
-        type: 'Ministry Program',
-        participants: [],
-        color: Colors.pink,
-      ),
-      Event(
-        id: 'event_10',
-        title: 'Reachout World Day',
-        description: 'Global Reachout Campaign with Rhapsody of Realities',
-        dateTime: DateTime(2025, 12, 1),
-        type: 'Global Reachout Campaign',
-        participants: [],
-        color: Colors.cyan,
-      ),
-      Event(
-        id: 'event_11',
-        title: 'December Global Communion Service',
-        description: '7 December 2025',
-        dateTime: DateTime(2025, 12, 7),
-        type: 'Ministry Program',
-        participants: [],
-        color: Colors.lime,
-      ),
-      Event(
-        id: 'event_12',
-        title: 'The President\'s Celebration Banquet & LW Global Day of Service',
-        description: '7 December 2025',
-        dateTime: DateTime(2025, 12, 7),
-        type: 'Celebration Event',
-        participants: [],
-        color: Colors.amber,
-      ),
-      Event(
-        id: 'event_13',
-        title: 'Holy Land Tour with Pastor Chris and Pastor Benny',
-        description: '9 December - 14 December 2025',
-        dateTime: DateTime(2025, 12, 9),
-        type: 'Holy Land Tour',
-        participants: [],
-        color: Colors.deepOrange,
-      ),
-      Event(
-        id: 'event_14',
-        title: 'End of the Year Thanksgiving',
-        description: '14 December - 21 December 2025',
-        dateTime: DateTime(2025, 12, 14),
-        type: 'Thanksgiving Service',
-        participants: [],
-        color: Colors.deepPurple,
-      ),
-      Event(
-        id: 'event_15',
-        title: 'Christmas Eve Praise Service with Pastor Chris',
-        description: '24 December - 25 December 2025',
-        dateTime: DateTime(2025, 12, 24),
-        type: 'Ministry Program',
-        participants: [],
-        color: Colors.red,
-      ),
-      Event(
-        id: 'event_16',
-        title: 'Global Fasting and Praying',
-        description: '29 December - 31 December 2025',
-        dateTime: DateTime(2025, 12, 29),
-        type: 'Ministry Program',
-        participants: [],
-        color: Colors.blue,
-      ),
-      Event(
-        id: 'event_17',
-        title: 'New Year\'s Eve Service with Pastor Chris',
-        description: '31 December 2025 - 1 January 2026',
-        dateTime: DateTime(2025, 12, 31),
-        type: 'Ministry Program',
+        id: 'event_3',
+        title: 'Minister\'s Bible Training Course (MBTC17) with Pastor Chris',
+        description: 'Tuesday 3rd - Saturday 7th February, 2026',
+        dateTime: DateTime(2026, 2, 3),
+        type: 'Training Course',
         participants: [],
         color: Colors.green,
       ),
       Event(
-        id: 'event_18',
-        title: 'January 2026 Global Communion Service with Pastor Chris',
-        description: '4 January 2026',
-        dateTime: DateTime(2026, 1, 4),
-        type: 'Ministry Program',
+        id: 'event_4',
+        title: 'Healing Streams Live Healing Services with Pastor Chris',
+        description: 'Friday 13th - Sunday 15th March, 2026',
+        dateTime: DateTime(2026, 3, 13),
+        type: 'Healing Services',
         participants: [],
-        color: Colors.orange,
+        color: Colors.red,
       ),
     ];
 
     for (final event in initialEvents) {
       _eventBox.add(event);
+      // Schedule reminders for each initial event
+      NotificationService.scheduleAllEventReminders(event);
     }
     notifyListeners();
   }
