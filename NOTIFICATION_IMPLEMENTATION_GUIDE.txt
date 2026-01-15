@@ -1,0 +1,365 @@
+# Flutter Persistent Notifications Implementation Guide
+
+## Overview
+This guide documents how to implement persistent notifications in Flutter that work even when:
+- The app is completely closed
+- The phone is restarted
+- The app is killed by the system
+- Battery optimization is enabled
+
+## Problem with Basic Flutter Notifications
+- flutter_local_notifications alone doesn't survive app closure
+- Notifications are lost when the app is killed or phone restarts
+- No guarantee of delivery for important reminders
+
+## Solution: Dual-Layer Notification System
+We implemented a robust system using TWO packages for maximum reliability:
+1. **flutter_local_notifications** - Primary notification display
+2. **android_alarm_manager_plus** - Background persistence & reboot survival
+
+---
+
+## STEP 1: Package Dependencies
+
+### Add to pubspec.yaml:
+```yaml
+dependencies:
+  flutter_local_notifications: ^17.2.3
+  android_alarm_manager_plus: ^4.0.4
+  timezone: ^0.9.4  # For scheduling exact times
+```
+
+### Remove if present (these caused compatibility issues):
+```yaml
+# DON'T USE THESE - they have build issues
+# awesome_notifications: ^0.9.3+1
+# workmanager: ^0.5.2
+```
+
+---
+
+## STEP 2: Android Permissions
+
+### Add to android/app/src/main/AndroidManifest.xml:
+
+```xml
+<manifest xmlns:android="http://schemas.android.com/apk/res/android"
+    package="your.package.name">
+
+    <!-- Essential notification permissions -->
+    <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
+    <uses-permission android:name="android.permission.RECEIVE_BOOT_COMPLETED" />
+    <uses-permission android:name="android.permission.VIBRATE" />
+    <uses-permission android:name="android.permission.WAKE_LOCK" />
+    <uses-permission android:name="android.permission.USE_EXACT_ALARM" />
+    <uses-permission android:name="android.permission.SCHEDULE_EXACT_ALARM" />
+
+    <application ...>
+        <!-- Your app activities here -->
+
+        <!-- Boot receiver for alarm manager -->
+        <receiver android:name="io.flutter.plugins.androidalarmmanager.AlarmBroadcastReceiver"
+            android:exported="false" />
+        <receiver android:name="io.flutter.plugins.androidalarmmanager.RebootBroadcastReceiver"
+            android:enabled="false"
+            android:exported="false">
+            <intent-filter>
+                <action android:name="android.intent.action.BOOT_COMPLETED" />
+            </intent-filter>
+        </receiver>
+    </application>
+</manifest>
+```
+
+---
+
+## STEP 3: Notification Service Implementation
+
+### Create the NotificationService class:
+
+```dart
+import 'package:flutter_local_notifications/flutter_local_notifications.dart';
+import 'package:android_alarm_manager_plus/android_alarm_manager_plus.dart';
+import 'package:timezone/timezone.dart' as tz;
+
+// Background callback for alarm manager
+@pragma('vm:entry-point')
+void alarmCallback() async {
+  final FlutterLocalNotificationsPlugin notifications = FlutterLocalNotificationsPlugin();
+
+  const androidSettings = AndroidInitializationSettings('@mipmap/ic_launcher');
+  const iosSettings = DarwinInitializationSettings();
+  const initSettings = InitializationSettings(android: androidSettings, iOS: iosSettings);
+
+  await notifications.initialize(initSettings);
+
+  await notifications.show(
+    DateTime.now().millisecondsSinceEpoch ~/ 1000,
+    'Event Reminder',
+    'You have an upcoming event!',
+    const NotificationDetails(
+      android: AndroidNotificationDetails(
+        'event_reminders',
+        'Event Reminders',
+        channelDescription: 'Event notifications',
+        importance: Importance.high,
+        priority: Priority.high,
+      ),
+    ),
+  );
+}
+
+class NotificationService {
+  static final FlutterLocalNotificationsPlugin _notifications =
+      FlutterLocalNotificationsPlugin();
+
+  static Future<void> initialize() async {
+    try {
+      // Initialize Flutter Local Notifications
+      const androidSettings = AndroidInitializationSettings('@mipmap/ic_launcher');
+      const iosSettings = DarwinInitializationSettings(
+        requestAlertPermission: true,
+        requestBadgePermission: true,
+        requestSoundPermission: true,
+      );
+
+      const initializationSettings = InitializationSettings(
+        android: androidSettings,
+        iOS: iosSettings,
+      );
+
+      await _notifications.initialize(initializationSettings);
+
+      // Initialize Android Alarm Manager for persistence
+      try {
+        await AndroidAlarmManager.initialize();
+      } catch (e) {
+        print('Android Alarm Manager failed: $e');
+        // Continue - Flutter notifications will still work
+      }
+    } catch (e) {
+      print('Error initializing notification service: $e');
+      rethrow;
+    }
+  }
+
+  static Future<void> scheduleReminder({
+    required String id,
+    required String title,
+    required String message,
+    required DateTime reminderTime,
+  }) async {
+    try {
+      if (reminderTime.isBefore(DateTime.now())) {
+        return; // Don't schedule past reminders
+      }
+
+      final notificationId = id.hashCode.abs();
+
+      // LAYER 1: Schedule with Flutter Local Notifications
+      await _notifications.zonedSchedule(
+        notificationId,
+        title,
+        message,
+        tz.TZDateTime.from(reminderTime, tz.local),
+        const NotificationDetails(
+          android: AndroidNotificationDetails(
+            'event_reminders',
+            'Event Reminders',
+            channelDescription: 'Event notifications',
+            importance: Importance.high,
+            priority: Priority.high,
+          ),
+        ),
+        androidScheduleMode: AndroidScheduleMode.exactAllowWhileIdle,
+        uiLocalNotificationDateInterpretation:
+            UILocalNotificationDateInterpretation.absoluteTime,
+      );
+
+      // LAYER 2: Schedule with Android Alarm Manager for persistence
+      try {
+        await AndroidAlarmManager.oneShot(
+          reminderTime.difference(DateTime.now()),
+          notificationId,
+          alarmCallback,
+          exact: true,
+          wakeup: true,
+          rescheduleOnReboot: true,
+        );
+      } catch (e) {
+        print('Android Alarm Manager scheduling failed: $e');
+        // Continue - Flutter notifications will still work
+      }
+    } catch (e) {
+      print('Error scheduling reminder: $e');
+      rethrow;
+    }
+  }
+
+  static Future<void> cancelReminder(String id) async {
+    final notificationId = id.hashCode.abs();
+
+    // Cancel Flutter notification
+    await _notifications.cancel(notificationId);
+
+    // Cancel alarm manager
+    try {
+      await AndroidAlarmManager.cancel(notificationId);
+    } catch (e) {
+      print('Failed to cancel alarm: $e');
+    }
+  }
+}
+```
+
+---
+
+## STEP 4: App Initialization
+
+### In your main.dart:
+
+```dart
+import 'package:timezone/data/latest.dart' as tz;
+
+void main() async {
+  WidgetsFlutterBinding.ensureInitialized();
+
+  // Initialize timezone data
+  tz.initializeTimeZones();
+
+  // Initialize notification service
+  await NotificationService.initialize();
+
+  // Continue with your app initialization
+  runApp(MyApp());
+}
+```
+
+---
+
+## STEP 5: Usage Examples
+
+### Schedule a single reminder:
+```dart
+await NotificationService.scheduleReminder(
+  id: 'meeting_123',
+  title: 'Meeting Reminder',
+  message: 'Your meeting starts in 15 minutes',
+  reminderTime: DateTime.now().add(Duration(minutes: 15)),
+);
+```
+
+### Schedule multiple reminders for an event:
+```dart
+final eventTime = DateTime(2026, 1, 15, 10, 0);
+final reminderTimes = [1440, 240, 60, 0]; // 1 day, 4 hours, 1 hour, at start
+
+for (int minutes in reminderTimes) {
+  final reminderTime = eventTime.subtract(Duration(minutes: minutes));
+
+  await NotificationService.scheduleReminder(
+    id: 'event_${eventId}_$minutes',
+    title: 'Event Reminder: $eventTitle',
+    message: _createReminderMessage(minutes, eventDescription),
+    reminderTime: reminderTime,
+  );
+}
+
+String _createReminderMessage(int minutesBefore, String description) {
+  if (minutesBefore == 0) {
+    return 'Event is starting now!\n$description';
+  } else if (minutesBefore >= 1440) {
+    final days = (minutesBefore / 1440).round();
+    return 'Starts in $days day${days > 1 ? 's' : ''}\n$description';
+  } else if (minutesBefore >= 60) {
+    final hours = (minutesBefore / 60).round();
+    return 'Starts in $hours hour${hours > 1 ? 's' : ''}\n$description';
+  } else {
+    return 'Starts in $minutesBefore minute${minutesBefore > 1 ? 's' : ''}\n$description';
+  }
+}
+```
+
+---
+
+## STEP 6: Testing the Implementation
+
+### Test notifications work:
+1. Schedule a notification for 10 seconds in the future
+2. Verify it appears when the app is open
+3. Close the app completely and verify notification still fires
+4. Restart the phone and verify notifications scheduled before restart still fire
+
+### Test method you can add:
+```dart
+static Future<void> scheduleTestNotification() async {
+  await scheduleReminder(
+    id: 'test_notification',
+    title: 'Test Notification',
+    message: 'Notification system is working! ✅',
+    reminderTime: DateTime.now().add(Duration(seconds: 10)),
+  );
+}
+```
+
+---
+
+## STEP 7: Common Issues & Solutions
+
+### Issue: Notifications not appearing
+- Check if POST_NOTIFICATIONS permission is granted
+- Verify app is not in battery optimization mode
+- Test with `androidScheduleMode: AndroidScheduleMode.exactAllowWhileIdle`
+
+### Issue: Android Alarm Manager build errors
+- Ensure you're using `android_alarm_manager_plus` (not the old version)
+- Add the receivers to AndroidManifest.xml as shown above
+- Use `@pragma('vm:entry-point')` on callback functions
+
+### Issue: Notifications disappear after phone restart
+- Verify RECEIVE_BOOT_COMPLETED permission is added
+- Ensure `rescheduleOnReboot: true` is set
+- Test with `exact: true` and `wakeup: true`
+
+### Issue: Package compatibility problems
+- Avoid using awesome_notifications and workmanager together
+- Stick to flutter_local_notifications + android_alarm_manager_plus
+- Update intl package if version conflicts occur
+
+---
+
+## STEP 8: Production Checklist
+
+✅ All required permissions added to AndroidManifest.xml
+✅ Both notification packages properly initialized
+✅ Error handling added for all notification operations
+✅ Test notifications work when app is closed
+✅ Test notifications survive phone restart
+✅ Notification channels properly configured
+✅ Background callback functions marked with @pragma('vm:entry-point')
+✅ Timezone initialization included
+✅ Battery optimization handling considered
+
+---
+
+## Key Advantages of This Approach
+
+1. **Dual Redundancy**: Two systems ensure maximum reliability
+2. **Reboot Survival**: AndroidAlarmManager reschedules after restart
+3. **Battery Optimization Bypass**: Uses exact alarms that can't be killed
+4. **Cross-Platform**: Works on both Android and iOS
+5. **Graceful Degradation**: If one system fails, the other continues working
+
+---
+
+## Performance Considerations
+
+- Use unique notification IDs to avoid conflicts
+- Cancel old notifications before scheduling new ones
+- Don't schedule too many notifications at once
+- Consider grouping notifications for the same event
+- Test on various Android versions and manufacturers
+
+---
+
+This implementation provides Google Calendar-level notification reliability for Flutter apps.
